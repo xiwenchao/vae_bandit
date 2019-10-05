@@ -254,8 +254,11 @@ def evaluate(input_generator, train_op_var, vae, sampled_z, sess):
 
             article_batch[batch_num] = article_features
             reward_batch[batch_num] = reward
+            user_batch[batch_num] = user_features
+            
+            batch_num += 1
 
-            if batch_num == batch_size-1:
+            if batch_num == batch_size:
                 update(reward_batch, train_op_var, vae, user_batch, sess, article_batch)
                 batch_num = 0
 
@@ -266,8 +269,6 @@ def evaluate(input_generator, train_op_var, vae, sampled_z, sess):
             score2 += reward
 
             impressions2 += 1
-
-            batch_num += 1
 
             if impressions1 == 200:
                 score1 /= impressions1
