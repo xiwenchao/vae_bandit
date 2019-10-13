@@ -9,6 +9,11 @@ import logging
 import numpy as np
 import seaborn as sn
 
+import time
+
+%matplotlib inline
+import matplotlib.pyplot as plt
+
 sn.set()
 
 import tensorflow as tf
@@ -20,17 +25,20 @@ tf.reset_default_graph()
 
 import signal
 
-from YahooExp_util_functions import getClusters, getIDAssignment, parseLine, save_to_file, articleAccess
-
 import sys
+
+
+from YahooExp_util_functions import getClusters, getIDAssignment, parseLine, save_to_file, articleAccess
 
 logger = logging.getLogger(__name__)
 
 logging.basicConfig(level=logging.DEBUG)
 
+x_result = []
+y_result = []
 
 class MultiVAE():
-    def __init__(self, p_dims, q_dims=None, lam=0.01, lr=1e-4, random_seed=98765):
+    def __init__(self, p_dims, q_dims=None, lam=0.01, lr=5e-5, random_seed=98765):
         self.p_dims = p_dims
 
         if q_dims is None:
@@ -57,10 +65,14 @@ class MultiVAE():
         self.keep_prob_ph = tf.placeholder_with_default(1.0, shape=None)
         self.reward = tf.placeholder(dtype=tf.float32, shape=[None, 1])
         self.article_features = tf.placeholder(dtype=tf.float32, shape=[None, self.dims[0]])
+        self.epsilon = tf.placeholder(dtype=tf.float32, shape=[None, self.dims[0]])
 
     def build_graph(self):
 
-        saver, logits, KL, sampled_z, mu_q = self.forward_pass()
+        mu_q, std_q, KL = self.q_graph()
+
+        sampled_z = mu_q + self.is_training_ph * \
+                    self.epsilon * std_q
 
         '''
         neg_ll = -tf.reduce_sum(self.input_ph * tf.log(logits) +
@@ -76,7 +88,7 @@ class MultiVAE():
         reg_var = apply_regularization(reg, self.weights_q + self.weights_p)
         # tensorflow l2 regularization multiply 0.5 to the l2 norm
         # multiply 2 so that it is back in the same scale
-        neg_ELBO = neg_ll + self.anneal_ph * KL + 2 * reg_var - self.reward * neg_reward
+        neg_ELBO = neg_ll + self.anneal_ph * KL + 2 * reg_var - tf.multiply(self.reward, neg_reward)
 
         train_op = tf.train.AdamOptimizer(self.lr).minimize(neg_ELBO)
 
@@ -121,6 +133,8 @@ class MultiVAE():
             else:
                 h = tf.sigmoid(h)
         return h
+      
+      
 
     def forward_pass(self):
         # q-network
@@ -133,7 +147,7 @@ class MultiVAE():
         # p-network
         logits = self.p_graph(sampled_z)
 
-        return tf.train.Saver(), logits, KL, sampled_z, KL
+        return tf.train.Saver(), logits, KL, sampled_z, epsilon
 
     def construct_weights(self):
 
@@ -177,12 +191,12 @@ r1 = 10
 
 r2 = 0
 
-n_epochs = 15
+n_epochs = 4
 
-batch_size = 10
+batch_size = 40
 
 
-def update(reward_batch, train_op_var, vae, X, sess, article_batch):
+def update(reward_batch, train_op_var, vae, X, sess, article_batch, epsilon_batch):
 
     i = 0
     for reward in reward_batch:
@@ -208,11 +222,13 @@ def update(reward_batch, train_op_var, vae, X, sess, article_batch):
                      vae.anneal_ph: 0.5,
                      vae.is_training_ph: 1,
                      vae.reward: reward_batch,
-                     vae.article_features: article_batch}
+                     vae.article_features: article_batch,
+                     vae.epsilon: epsilon_batch}
+        
         sess.run(train_op_var, feed_dict=feed_dict)
 
 
-def evaluate(input_generator, train_op_var, vae, sampled_z, sess):
+def evaluate(input_generator, train_op_var, vae, sampled_z, sess, epsilon):
     score1, score2 = 0.0, 0
 
     impressions1, impressions2, batch_num = 0.0, 0, 0
@@ -222,6 +238,7 @@ def evaluate(input_generator, train_op_var, vae, sampled_z, sess):
     article_batch = np.zeros([batch_size, d])
     user_batch = np.zeros([batch_size, d])
     reward_batch = np.zeros(batch_size)
+    epsilon_batch = np.zeros([batch_size, d])
 
     for line in input_generator:
 
@@ -232,7 +249,8 @@ def evaluate(input_generator, train_op_var, vae, sampled_z, sess):
         user_features = np.array(user_features)
 
         feed_dict = {vae.input_ph: user_features.reshape(1, d)}
-        mu = sess.run(sampled_z, feed_dict=feed_dict)
+        mu, epsilon_2 = sess.run([sampled_z, epsilon], feed_dict=feed_dict)
+
 
         value, max_a = 0, 0
 
@@ -255,11 +273,11 @@ def evaluate(input_generator, train_op_var, vae, sampled_z, sess):
             article_batch[batch_num] = article_features
             reward_batch[batch_num] = reward
             user_batch[batch_num] = user_features
-            
+            epsilon_batch[batch_num] = epsilon_2
             batch_num += 1
 
             if batch_num == batch_size:
-                update(reward_batch, train_op_var, vae, user_batch, sess, article_batch)
+                update(reward_batch, train_op_var, vae, user_batch, sess, article_batch, epsilon_batch)
                 batch_num = 0
 
             score1 += reward
@@ -273,6 +291,9 @@ def evaluate(input_generator, train_op_var, vae, sampled_z, sess):
             if impressions1 == 200:
                 score1 /= impressions1
                 print("CTR for this epoch: %.5f" % score1)
+                x_result.append(impressions2 // 200)
+                y_result.append(score1)
+
                 score1 = 0
                 impressions1 = 0
 
@@ -291,43 +312,18 @@ def evaluate(input_generator, train_op_var, vae, sampled_z, sess):
 
             return score2
 
-def run(log_file, train_op_var, vae, sampled_z, sess):
+def run(log_file, train_op_var, vae, sampled_z, sess, epsilon):
     with open(log_file, 'r', buffering=1024 * 1024 * 512) as inf:
         return evaluate(inf, train_op_var, vae, sampled_z, sess)
 
 
 if __name__ == "__main__":
-    '''
-    parser = argparse.ArgumentParser(
 
-        description=__doc__,
-
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-
-    parser.add_argument(
-
-        'log_file', help='File containing the log.')
-
-    parser.add_argument(
-
-        'articles_file', help='File containing the article features.')
-
-    parser.add_argument(
-
-        'source_file', help='.py file implementing the policy.')
-
-    parser.add_argument(
-
-        '--log', '-l', help='Enable logging for debugging', action='store_true')
-
-    args = parser.parse_args()
-    '''
-
-    log_file = "ydata-fp-td-clicks-v1_0.20090501"
+    log_file = "./data/ydata-fp-td-clicks-v1_0.20090501"
     articles_file = "drive/My Drive/Colab Notebooks/Bandit_vae/data/webscope-articles.txt"
     source_file = "policy.py"
 
-    p_dims = [6, 12, 24, 12, 6]
+    p_dims = [6, 12, 36, 6]
 
     # saver, logits_var, loss_var, train_op_var, merged_var, sampled_z = vae.build_graph()
     tf.reset_default_graph()
@@ -339,4 +335,23 @@ if __name__ == "__main__":
         sess.run(init)
         sess.run(tf.local_variables_initializer())
 
+        starttime = time.time()
         run(log_file, train_op_var, vae, sampled_z, sess)
+        endtime = time.time()
+        print(endtime - starttime)
+
+        plt.figure()  # 创建绘图对象
+
+        plt.plot(x_result, y_result, "b-", linewidth=1)  # 在当前绘图对象绘图（X轴，Y轴，蓝色虚线，线宽度）
+
+        plt.xlabel("Iteration(200)")  # X轴标签
+
+        plt.ylabel("CTR")  # Y轴标签
+
+        plt.title("batch_train")  # 图标题
+
+        plt.show()  # 显示图
+
+        plt.savefig("batch_train.jpg")  # 保存
+
+        sess.close()
