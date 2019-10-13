@@ -73,6 +73,9 @@ class MultiVAE():
 
         sampled_z = mu_q + self.is_training_ph * \
                     self.epsilon * std_q
+        
+        # p-network
+        logits = self.p_graph(sampled_z)
 
         '''
         neg_ll = -tf.reduce_sum(self.input_ph * tf.log(logits) +
@@ -98,7 +101,7 @@ class MultiVAE():
         tf.summary.scalar('neg_ELBO_train', neg_ELBO)
         merged = tf.summary.merge_all()
 
-        return saver, logits, neg_ELBO, train_op, merged, sampled_z
+        return logits, neg_ELBO, train_op, merged, sampled_z
 
     def q_graph(self):
 
@@ -187,7 +190,7 @@ d = 6
 
 alpha = 5
 
-r1 = 10
+r1 = 7
 
 r2 = 0
 
@@ -314,7 +317,7 @@ def evaluate(input_generator, train_op_var, vae, sampled_z, sess, epsilon):
 
 def run(log_file, train_op_var, vae, sampled_z, sess, epsilon):
     with open(log_file, 'r', buffering=1024 * 1024 * 512) as inf:
-        return evaluate(inf, train_op_var, vae, sampled_z, sess)
+        return evaluate(inf, train_op_var, vae, sampled_z, sess, epsilon)
 
 
 if __name__ == "__main__":
@@ -328,7 +331,10 @@ if __name__ == "__main__":
     # saver, logits_var, loss_var, train_op_var, merged_var, sampled_z = vae.build_graph()
     tf.reset_default_graph()
     vae = MultiVAE(p_dims, lam=0.02, random_seed=98765)
-    saver, logits_var, loss_var, train_op_var, merged_var, sampled_z = vae.build_graph()
+    
+    logits_var, loss_var, train_op_var, merged_var, _ = vae.build_graph()
+    _, logits, KL, sampled_z, epsilon = vae.forward_pass()
+    
     init = tf.global_variables_initializer()
 
     with tf.Session() as sess:
@@ -336,7 +342,7 @@ if __name__ == "__main__":
         sess.run(tf.local_variables_initializer())
 
         starttime = time.time()
-        run(log_file, train_op_var, vae, sampled_z, sess)
+        run(log_file, train_op_var, vae, sampled_z, sess, epsilon)
         endtime = time.time()
         print(endtime - starttime)
 
